@@ -841,14 +841,14 @@ def subscribe(request, plan):
 
     price = PLAN_META[plan]['price']
     tran_id = f"GH-SUB-{request.user.id}-{uuid.uuid4().hex[:8].upper()}"
-    expires_at = timezone.now() + timedelta(days=30)
 
+    # Created as NOT active. Premium only starts after payment is submitted.
     subscription, _ = PremiumSubscription.objects.update_or_create(
         user=request.user,
         defaults={
             'plan': plan,
-            'status': 'active',
-            'expires_at': expires_at,
+            'status': 'expired',
+            'expires_at': timezone.now(),
             'transaction_id': tran_id,
             'amount_paid': price,
         }
@@ -856,12 +856,21 @@ def subscribe(request, plan):
     return redirect('music:payment_gateway_select', purpose='subscription', ref_id=subscription.id)
 
 
-@csrf_exempt
+@login_required
 def subscription_success(request, subscription_id):
-    subscription = get_object_or_404(PremiumSubscription, id=subscription_id)
-    subscription.status = 'active'
-    subscription.expires_at = timezone.now() + timedelta(days=30)
-    subscription.save()
+    from django.db import transaction as db_transaction
+    # DEMO: no gateway verification. Only the owner can activate, and only once.
+    with db_transaction.atomic():
+        subscription = get_object_or_404(
+            PremiumSubscription.objects.select_for_update(),
+            id=subscription_id, user=request.user,
+        )
+        if subscription.is_active():
+            messages.info(request, 'Your subscription is already active.')
+            return redirect('music:subscription_dashboard')
+        subscription.status = 'active'
+        subscription.expires_at = timezone.now() + timedelta(days=30)
+        subscription.save()
     Notification.objects.create(
         user=subscription.user,
         message=f'🎉 Welcome to GaanHub Premium ({subscription.get_plan_display()})! Enjoy ad-free music.',
@@ -936,12 +945,21 @@ def buy_song(request, pk):
     return redirect('music:payment_gateway_select', purpose='song', ref_id=purchase.id)
 
 
-@csrf_exempt
+@login_required
 def payment_success(request, purchase_id):
-    purchase = get_object_or_404(Purchase, id=purchase_id)
-    purchase.status = 'completed'
-    purchase.save()
-    credit_sale_royalty(purchase.song, purchase.amount)
+    from django.db import transaction as db_transaction
+    # DEMO: no gateway verification. Only the buyer can complete, and only once.
+    with db_transaction.atomic():
+        purchase = get_object_or_404(
+            Purchase.objects.select_for_update(),
+            id=purchase_id, user=request.user,
+        )
+        if purchase.status == 'completed':
+            messages.info(request, 'This purchase is already completed.')
+            return redirect('music:song_detail', pk=purchase.song.pk)
+        purchase.status = 'completed'
+        purchase.save()
+        credit_sale_royalty(purchase.song, purchase.amount)
     _notify_purchase_complete(request, purchase)
     messages.success(request, f'✅ Payment confirmed! Enjoy "{purchase.song.title}".')
     return redirect('music:song_detail', pk=purchase.song.pk)
@@ -1000,25 +1018,29 @@ def wallet_dashboard(request):
 
 @login_required
 def request_withdrawal(request):
+    from django.db import transaction as db_transaction
     if not is_artist(request.user):
         return redirect('music:become_artist')
     artist = request.user.artist
     wallet = get_or_create_wallet(artist)
     MIN_WITHDRAWAL = Decimal('100.00')
+    VALID_METHODS = {'bkash', 'nagad', 'rocket', 'bank'}
 
     if request.method == 'POST':
         method = request.POST.get('method', '').strip()
+        if method not in VALID_METHODS:
+            messages.error(request, 'Please choose a valid withdrawal method.')
+            return redirect('music:request_withdrawal')
         try:
-            amount = Decimal(request.POST.get('amount', '0'))
+            amount = Decimal(request.POST.get('amount', '0')).quantize(Decimal('0.01'))
+            if not amount.is_finite():
+                raise ValueError
         except Exception:
             messages.error(request, 'Invalid amount.')
             return redirect('music:request_withdrawal')
 
         if amount < MIN_WITHDRAWAL:
             messages.error(request, f'Minimum withdrawal is ৳{MIN_WITHDRAWAL}.')
-            return redirect('music:request_withdrawal')
-        if amount > wallet.balance:
-            messages.error(request, f'Insufficient balance. Your balance is ৳{wallet.balance}.')
             return redirect('music:request_withdrawal')
 
         wr = WithdrawalRequest(wallet=wallet, amount=amount, method=method)
@@ -1040,8 +1062,18 @@ def request_withdrawal(request):
                 return redirect('music:request_withdrawal')
 
         wr.note = request.POST.get('note', '').strip()
-        wr.save()
-        wallet.debit(amount, description=f'Withdrawal via {wr.get_method_display()} — #{wr.id}')
+
+        # Save the request and take the money in ONE transaction.
+        # debit() locks the wallet row and re-checks the balance.
+        try:
+            with db_transaction.atomic():
+                wr.save()
+                wallet.debit(amount, description=f'Withdrawal via {wr.get_method_display()} — #{wr.id}')
+        except ValueError:
+            wallet.refresh_from_db()
+            messages.error(request, f'Insufficient balance. Your balance is ৳{wallet.balance}.')
+            return redirect('music:request_withdrawal')
+
         Notification.objects.create(
             user=request.user,
             message=(
@@ -1120,38 +1152,48 @@ def payment_gateway_select(request, purpose, ref_id):
 
 @login_required
 def payment_manual_submit(request, purpose, ref_id):
-    """User submits their bKash/Nagad/Bank TrxID after paying manually."""
+    import re
+    from django.db import transaction as db_transaction
+    # DEMO: the TrxID is recorded but NOT verified with bKash/Nagad/bank.
     if request.method != 'POST':
         return redirect('music:home')
 
-    gateway = request.POST.get('gateway', '').strip()
+    gateway = request.POST.get('gateway', '').strip().lower()
     trx_id = request.POST.get('trx_id', '').strip()
-    amount_str = request.POST.get('amount', '0')
+    back = redirect('music:payment_gateway_select', purpose=purpose, ref_id=ref_id)
 
-    if not trx_id:
-        messages.error(request, 'Please enter your Transaction ID.')
-        return redirect('music:payment_gateway_select', purpose=purpose, ref_id=ref_id)
+    if gateway not in ('bkash', 'nagad', 'rocket', 'bank'):
+        messages.error(request, 'Please choose a valid payment method.')
+        return back
+    if not re.fullmatch(r'[A-Za-z0-9_-]{6,60}', trx_id):
+        messages.error(request, 'Please enter a valid Transaction ID (6-60 letters or digits).')
+        return back
+    if (Purchase.objects.filter(transaction_id=trx_id).exists()
+            or PremiumSubscription.objects.filter(transaction_id=trx_id).exists()):
+        messages.error(request, 'This Transaction ID has already been used.')
+        return back
 
     log_trx = f"MANUAL-{gateway.upper()}-{uuid.uuid4().hex[:8].upper()}"
-    try:
-        PaymentLog.objects.create(
-            user=request.user,
-            gateway=gateway,
-            amount=Decimal(str(amount_str)),
-            transaction_id=log_trx,
-            purpose=purpose,
-            status='pending',
-            raw_response=f'User submitted TrxID: {trx_id}',
-        )
-    except Exception:
-        pass
 
     if purpose == 'subscription':
-        sub = get_object_or_404(PremiumSubscription, id=ref_id, user=request.user)
-        sub.status = 'active'
-        sub.transaction_id = trx_id
-        sub.expires_at = timezone.now() + timedelta(days=30)
-        sub.save()
+        with db_transaction.atomic():
+            sub = get_object_or_404(
+                PremiumSubscription.objects.select_for_update(),
+                id=ref_id, user=request.user,
+            )
+            if sub.is_active():
+                messages.info(request, 'Your subscription is already active.')
+                return redirect('music:subscription_dashboard')
+            PaymentLog.objects.create(
+                user=request.user, gateway=gateway,
+                amount=sub.amount_paid,  # price comes from the server, never the form
+                transaction_id=log_trx, purpose=purpose, status='unverified',
+                raw_response=f'User submitted TrxID: {trx_id}',
+            )
+            sub.status = 'active'
+            sub.transaction_id = trx_id
+            sub.expires_at = timezone.now() + timedelta(days=30)
+            sub.save()
         Notification.objects.create(
             user=request.user,
             message=f'🎉 Premium activated via {gateway}! Enjoy ad-free music.',
@@ -1164,12 +1206,26 @@ def payment_manual_submit(request, purpose, ref_id):
         return redirect('music:subscription_dashboard')
 
     elif purpose == 'song':
-        purchase = get_object_or_404(Purchase, id=ref_id, user=request.user)
-        purchase.status = 'completed'
-        purchase.transaction_id = trx_id
-        purchase.save()
-        # ── Credit artist wallet with 80% of sale price ──────────────────────
-        credit_sale_royalty(purchase.song, purchase.amount)
+        with db_transaction.atomic():
+            purchase = get_object_or_404(
+                Purchase.objects.select_for_update(),
+                id=ref_id, user=request.user,
+            )
+            if purchase.status == 'completed':
+                messages.info(request, 'You already own this song.')
+                return redirect('music:song_detail', pk=purchase.song.pk)
+            PaymentLog.objects.create(
+                user=request.user, gateway=gateway,
+                amount=purchase.amount,  # price comes from the server, never the form
+                transaction_id=log_trx, purpose=purpose, status='unverified',
+                raw_response=f'User submitted TrxID: {trx_id}',
+            )
+            purchase.status = 'completed'
+            purchase.transaction_id = trx_id
+            purchase.save()
+            # Artist royalty is credited exactly once, because the status check above
+            # stops a second submission.
+            credit_sale_royalty(purchase.song, purchase.amount)
         _notify_purchase_complete(request, purchase)
         messages.success(
             request,
