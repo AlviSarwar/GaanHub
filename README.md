@@ -1,5 +1,7 @@
 # GaanHub
 
+[![CI](https://github.com/AlviSarwar/GaanHub/actions/workflows/ci.yml/badge.svg)](https://github.com/AlviSarwar/GaanHub/actions)
+
 A Spotify-inspired music streaming platform built with Django, with artist
 accounts, subscriptions, a wallet system and payment gateway support.
 
