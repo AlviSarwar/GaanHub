@@ -23,6 +23,16 @@ accounts, subscriptions, a wallet system and payment gateway support.
 - SQLite (development)
 
 ## Project Structure
+
+```
+gaanhub/
+  gaanhub/     project settings, urls, context processors
+  music/       songs, playlists, artists, payments, wallet
+  users/       authentication and profile views
+  templates/   HTML templates
+  static/      CSS
+```
+
 ## Getting Started
 
 ```bash
@@ -59,6 +69,12 @@ Add screenshots to a `docs/` folder and link them here.
 - [ ] Automated tests and CI
 - [ ] Recommendations
 - [ ] Production deployment guide
+
+## Contributors
+
+- Alvi Sarwar
+- Sabbeer60 ([@Sabbeer60](https://github.com/Sabbeer60))
+- Al Shahriar Hossain Piyal
 
 ## License
 
