@@ -245,29 +245,41 @@ class ArtistWallet(models.Model):
 
     def credit(self, amount, description='', source='stream'):
         from decimal import Decimal
+        from django.db import transaction
         amount = Decimal(str(amount))
-        self.balance += amount
-        self.total_earned += amount
-        self.save()
-        WalletTransaction.objects.create(
-            wallet=self, amount=amount,
-            transaction_type='credit', source=source,
-            description=description,
-        )
+        if amount <= 0:
+            raise ValueError('Amount must be positive')
+        with transaction.atomic():
+            wallet = ArtistWallet.objects.select_for_update().get(pk=self.pk)
+            wallet.balance += amount
+            wallet.total_earned += amount
+            wallet.save(update_fields=['balance', 'total_earned', 'last_updated'])
+            WalletTransaction.objects.create(
+                wallet=wallet, amount=amount,
+                transaction_type='credit', source=source,
+                description=description,
+            )
+        self.refresh_from_db()
 
     def debit(self, amount, description=''):
         from decimal import Decimal
+        from django.db import transaction
         amount = Decimal(str(amount))
-        if self.balance < amount:
-            raise ValueError('Insufficient balance')
-        self.balance -= amount
-        self.total_withdrawn += amount
-        self.save()
-        WalletTransaction.objects.create(
-            wallet=self, amount=amount,
-            transaction_type='debit', source='withdrawal',
-            description=description,
-        )
+        if amount <= 0:
+            raise ValueError('Amount must be positive')
+        with transaction.atomic():
+            wallet = ArtistWallet.objects.select_for_update().get(pk=self.pk)
+            if wallet.balance < amount:
+                raise ValueError('Insufficient balance')
+            wallet.balance -= amount
+            wallet.total_withdrawn += amount
+            wallet.save(update_fields=['balance', 'total_withdrawn', 'last_updated'])
+            WalletTransaction.objects.create(
+                wallet=wallet, amount=amount,
+                transaction_type='debit', source='withdrawal',
+                description=description,
+            )
+        self.refresh_from_db()
 
 
 class WalletTransaction(models.Model):
