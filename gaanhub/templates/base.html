@@ -328,13 +328,7 @@ function _doPlay(url,title,artist,cover,songId){
   currentIndex=existing; playCurrent();
 }
 function showPremiumGate(songId,title){
-  var msg="🔒 ""+title+"" is a premium song.
-
-You can:
-• Subscribe to stream ALL premium songs
-• Or buy this song to own & download it forever.
-
-Click OK to go to the song page.";
+  var msg='🔒 "'+title+'" is a premium song.\n\nYou can:\n• Subscribe to stream ALL premium songs\n• Or buy this song to own & download it forever.\n\nClick OK to go to the song page.';
   if(confirm(msg)){ window.location.href="/music/songs/"+songId+"/"; }
 }
 

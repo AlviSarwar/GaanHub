@@ -1,17 +1,32 @@
 from pathlib import Path
 import os
+from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load environment variables from .env file (if it exists)
+load_dotenv(BASE_DIR / '.env')
 
-SECRET_KEY = os.environ.get(
-    'DJANGO_SECRET_KEY',
-    'django-insecure-0*b@o7c2=k9wodoz3pqj1bzydctqto^*$(a!ejq3tx!0ijt=4a'
-)
+# -- SECURITY ------------------------------------------------------------------
+# In production: set DJANGO_SECRET_KEY and DJANGO_DEBUG=False via .env
+# (never commit secrets)
+DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
 
-DEBUG = os.environ.get('DJANGO_DEBUG', 'True') == 'True'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = 'dev-only-insecure-key-do-not-use-in-production'
+    else:
+        raise ImproperlyConfigured(
+            'DJANGO_SECRET_KEY is not set. Add it to your .env file.'
+        )
 
-ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '*').split(',')
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+    if h.strip()
+]
 
 
 INSTALLED_APPS = [
@@ -50,7 +65,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
-                
+                # Injects is_premium + user_subscription into all templates
                 'gaanhub.context_processors.premium_status',
             ],
         },
@@ -96,10 +111,10 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
-
+# -- PAYMENT (SSLCommerz - sandbox by default) ---------------------------------
 SSLCOMMERZ_STORE_ID = os.environ.get('SSLCOMMERZ_STORE_ID', 'your_store_id')
 SSLCOMMERZ_STORE_PASS = os.environ.get('SSLCOMMERZ_STORE_PASS', 'your_store_pass')
-SSLCOMMERZ_SANDBOX = True
+SSLCOMMERZ_SANDBOX = os.environ.get('SSLCOMMERZ_SANDBOX', 'True') == 'True'
 
 
 PREMIUM_PLAN_PRICES = {
@@ -107,3 +122,10 @@ PREMIUM_PLAN_PRICES = {
     'student': 99,
     'family': 349,
 }
+
+# -- PRODUCTION SECURITY HEADERS (set these in production only) ----------------
+# Uncomment in production when DEBUG=False and HTTPS is enabled:
+# SECURE_HSTS_SECONDS = 31536000
+# SECURE_SSL_REDIRECT = True
+# SESSION_COOKIE_SECURE = True
+# CSRF_COOKIE_SECURE = True

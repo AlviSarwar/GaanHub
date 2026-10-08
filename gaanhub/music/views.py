@@ -21,6 +21,10 @@ from .models import (
     WithdrawalRequest, PaymentLog,
 )
 from .forms import SongForm, ArtistForm, PlaylistForm
+from .utils import (
+    user_has_premium, get_purchased_ids, get_or_create_wallet,
+    credit_play_royalty, credit_sale_royalty,
+)
 
 
 
@@ -42,9 +46,11 @@ def user_has_premium(user):
 
 def artist_required(view_func):
     """Decorator: user must have an Artist profile."""
-    @login_required
     @wraps(view_func)
     def wrapper(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            from django.contrib.auth.views import redirect_to_login
+            return redirect_to_login(request.get_full_path())
         if not is_artist(request.user):
             messages.warning(
                 request,
@@ -58,9 +64,11 @@ def artist_required(view_func):
 
 def artist_mode_required(view_func):
     """Decorator: user must have Artist profile AND be in Artist Mode."""
-    @login_required
     @wraps(view_func)
     def wrapper(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            from django.contrib.auth.views import redirect_to_login
+            return redirect_to_login(request.get_full_path())
         if not is_artist(request.user):
             messages.warning(
                 request,
@@ -125,10 +133,7 @@ def home(request):
         )
     is_premium = user_has_premium(request.user)
     # Build a set of song IDs the user has purchased (for quick template checks)
-    purchased_ids = set(
-        Purchase.objects.filter(user=request.user, status='completed')
-        .values_list('song_id', flat=True)
-    ) if request.user.is_authenticated else set()
+    purchased_ids = get_purchased_ids(request.user)
     return render(request, 'home.html', {
         'songs': songs,
         'query': query,
@@ -146,10 +151,7 @@ def song_list(request):
             
         )
     is_premium = user_has_premium(request.user) if request.user.is_authenticated else False
-    purchased_ids = set(
-        Purchase.objects.filter(user=request.user, status='completed')
-        .values_list('song_id', flat=True)
-    ) if request.user.is_authenticated else set()
+    purchased_ids = get_purchased_ids(request.user)
     return render(request, 'song_list.html', {
         'songs': songs,
         'query': query,
@@ -1060,45 +1062,7 @@ def request_withdrawal(request):
     })
 
 
-# ── ROYALTY HELPERS ───────────────────────────────────────────────────────────
-
-def credit_play_royalty(song):
-    """Credit ৳0.50 per 1000 plays as a fractional royalty per play."""
-    if not song.artist:
-        return
-    try:
-        wallet = get_or_create_wallet(song.artist)
-        royalty_per_play = Decimal('0.00050')  # ৳0.50 / 1000
-        wallet.credit(royalty_per_play, description=f'Stream: {song.title}', source='stream')
-    except Exception:
-        pass  # Never crash a play because of wallet issues
-
-
-def credit_sale_royalty(song, amount):
-    """
-    Credit 80% of sale price to the artist's wallet.
-    Called immediately after a purchase is confirmed (manual submit or SSLCommerz callback).
-    The remaining 20% is GaanHub's platform fee.
-    """
-    if not song.artist:
-        return
-    try:
-        artist_share = Decimal(str(amount)) * Decimal('0.80')
-        wallet = get_or_create_wallet(song.artist)
-        wallet.credit(
-            artist_share,
-            description=f'Song sale: {song.title} (80% of ৳{amount})',
-            source='sale',
-        )
-        # Notify the artist
-        if song.artist.user:
-            Notification.objects.create(
-                user=song.artist.user,
-                message=f'💰 Someone bought "{song.title}"! ৳{artist_share:.2f} credited to your wallet.',
-                link='/music/wallet/',
-            )
-    except Exception:
-        pass
+# ── ROYALTY HELPERS are in music/utils.py ────────────────────────────────────
 
 
 # ── PAYMENT GATEWAY (bKash / Nagad / Rocket / Bank) ──────────────────────────
