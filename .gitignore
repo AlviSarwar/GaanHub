@@ -1,8 +1,26 @@
-﻿.idea/
-.env
-db.sqlite3
-venv/
+# IDE
+.idea/
+.vscode/
+
+# Python
 __pycache__/
-*.pyc
-media/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# Django
+*.log
+db.sqlite3
+db.sqlite3-journal
 staticfiles/
+media/
+
+# Secrets
+.env
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
